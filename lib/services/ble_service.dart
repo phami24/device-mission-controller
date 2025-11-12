@@ -5,6 +5,60 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'event_bus.dart';
 
+// ============================================================================
+// BLE Event Handler - Simple event handler with on() and emit() methods
+// ============================================================================
+class BleEventHandler {
+  final Map<String, Function> _callbacks = {};
+
+  /// Register a callback for an event type
+  /// Example: bleHandler.on("HOME", (data) => print(data));
+  void on(String eventType, Function callback) {
+    _callbacks[eventType] = callback;
+  }
+
+  /// Emit an event with data
+  /// Example: bleHandler.emit("HOME", "133278830,108547396");
+  void emit(String eventType, String data) {
+    final callback = _callbacks[eventType];
+    if (callback != null) {
+      callback(data);
+    }
+  }
+
+}
+
+// ============================================================================
+// BLE Message Parser - Parses incoming messages from BLE device
+// ============================================================================
+class BleMessageParser {
+  final String prefix;
+
+  BleMessageParser({this.prefix = ':'});
+
+  /// Parse a raw message string and return event type and data
+  /// Format: "EVENT_TYPE:data"
+  /// Example: "HOME:133278830,108547396" -> {"event": "HOME", "data": "133278830,108547396"}
+  Map<String, String>? parse(String message) {
+    if (message.isEmpty) return null;
+
+    final index = message.indexOf(prefix);
+    if (index == -1) return null;
+
+    final eventType = message.substring(0, index).trim();
+    final data = message.substring(index + 1).trim();
+
+    if (eventType.isEmpty) return null;
+
+    return {'event': eventType, 'data': data};
+  }
+
+}
+
+// ============================================================================
+// BLE Service - Main BLE connection and communication service
+// ============================================================================
+
 class BleService {
   static final BleService _instance = BleService._internal();
   factory BleService() => _instance;
@@ -39,20 +93,23 @@ class BleService {
   final _connectionStatusController = StreamController<bool>.broadcast();
   Stream<bool> get connectionStatus => _connectionStatusController.stream;
   
-  // Event Bus for messages
+  // Event Bus for messages (backward compatibility)
   final EventBus _eventBus = EventBus();
   
-  // Public streams - access via EventBus
+  // New event handler (clean pattern like nt.txt)
+  final BleEventHandler _eventHandler = BleEventHandler();
+  final BleMessageParser _messageParser = BleMessageParser(prefix: ':');
+  
+  // Public streams - access via EventBus (backward compatibility)
   Stream<BleHomeEvent> get homeMessages => _eventBus.onHome;
   Stream<BleWpEvent> get wpMessages => _eventBus.onWp;
   Stream<BleStatusEvent> get statusMessages => _eventBus.onStatus;
-  Stream<BleBatteryEvent> get batteryMessages => _eventBus.onBattery;
-  Stream<BleEfkEvent> get ekfMessages => _eventBus.onEfk;
-  Stream<BleRawMessageEvent> get rawMessages => _eventBus.onRawMessage;
+  
+  // New event handler access (clean API)
+  BleEventHandler get on => _eventHandler;
   
   bool _isListening = false;
-  StringBuffer _messageBuffer = StringBuffer();
-  int _dataReceivedCount = 0;
+  final StringBuffer _messageBuffer = StringBuffer();
   
   bool get isConnected => _isConnected;
   bool get isConnecting => _isConnecting;
@@ -75,7 +132,6 @@ class BleService {
         }
       }
       if (cccd == null) {
-        print('[BLE] CCCD (0x2902) descriptor not found for ${ch.uuid}');
         return;
       }
       // Determine value for notify/indicate
@@ -83,11 +139,9 @@ class BleService {
           ? <int>[0x02, 0x00] // Indications enabled
           : <int>[0x01, 0x00] // Notifications enabled
           ;
-      print('[BLE] Writing CCCD 0x2902 for ${ch.uuid}: ${value.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')}');
       await cccd.write(value);
-      print('[BLE] ✓ CCCD write completed for ${ch.uuid}');
     } catch (e) {
-      print('[BLE] ERROR writing CCCD for ${ch.uuid}: $e');
+      // Ignore CCCD write errors
     }
   }
 
@@ -95,24 +149,11 @@ class BleService {
   Future<bool> _reconnectDirectly({int scanDurationSeconds = 10}) async {
     // Kiểm tra kỹ hơn: nếu đã connected hoặc đang connecting/setting up, không reconnect
     if (_lastDeviceId == null || _isConnecting || _isConnected || _isSettingUp) {
-      if (_isConnected) {
-        print('[BLE] Skip reconnect: already connected');
-      } else if (_isConnecting) {
-        print('[BLE] Skip reconnect: already connecting');
-      } else if (_isSettingUp) {
-        print('[BLE] Skip reconnect: already setting up');
-      }
       return _isConnected;
     }
 
     try {
-      print('[BLE] ========================================');
       print('[BLE] 🔄 QUICK RECONNECT: Kết nối trực tiếp bằng device ID...');
-      print('[BLE] Device ID: $_lastDeviceId');
-      print('[BLE] Device Name: $_lastDeviceName');
-      print('[BLE] Scan duration: ${scanDurationSeconds}s');
-      print('[BLE] Time: ${DateTime.now()}');
-      print('[BLE] ========================================');
 
       _isConnecting = true;
 
@@ -123,8 +164,6 @@ class BleService {
       }
 
       // Tìm device bằng ID - scan với thời gian dài hơn để đảm bảo tìm thấy
-      print('[BLE] Scanning for device by ID (${scanDurationSeconds}s)...');
-      
       // Stop any ongoing scan first
       try {
         await FlutterBluePlus.stopScan();
@@ -139,7 +178,6 @@ class BleService {
         for (var result in results) {
           if (result.device.remoteId.toString() == _lastDeviceId) {
             foundDevice = result.device;
-            print('[BLE] ✓ Found device in scan: ${foundDevice!.platformName}');
             break;
           }
         }
@@ -179,7 +217,6 @@ class BleService {
       }
 
       // Connect trực tiếp
-      print('[BLE] Connecting directly to device...');
       await device.connect(
         timeout: const Duration(seconds: 15),
         autoConnect: true,
@@ -191,7 +228,7 @@ class BleService {
           .first
           .timeout(const Duration(seconds: 10));
 
-      print('[BLE] ✓ Direct connection established!');
+      print('[BLE] ✓ Reconnect thành công!');
 
       // Tiếp tục setup như connectToDevice (discover services, setup characteristics, etc.)
       // Gọi lại phần setup từ connectToDevice
@@ -199,7 +236,6 @@ class BleService {
 
       return true;
     } catch (e) {
-      print('[BLE] ✗ Quick reconnect failed: $e');
       _isConnecting = false;
       return false;
     }
@@ -208,13 +244,7 @@ class BleService {
   /// Setup device sau khi connect (discover services, setup characteristics, etc.)
   Future<void> _setupDeviceAfterConnection(BluetoothDevice device) async {
     // Tránh duplicate setup: nếu đang setup hoặc đã connected và có characteristic, skip
-    if (_isSettingUp) {
-      print('[BLE] Already setting up, skipping duplicate setup...');
-      return;
-    }
-    
-    if (_isConnected && _characteristic != null) {
-      print('[BLE] Already connected and setup, skipping duplicate setup...');
+    if (_isSettingUp || (_isConnected && _characteristic != null)) {
       return;
     }
     
@@ -223,13 +253,11 @@ class BleService {
       // Request MTU
       try {
         await device.requestMtu(517);
-        await Future.delayed(const Duration(milliseconds: 300));
       } catch (e) {
-        print('[BLE] MTU request failed: $e');
+        // Ignore MTU errors
       }
 
       // Discover services
-      await Future.delayed(const Duration(milliseconds: 500));
       List<BluetoothService> services = await device.discoverServices();
       
       // Verify Nordic UART service
@@ -281,7 +309,6 @@ class BleService {
       _lastDeviceName = _deviceName;
       _connectionStateSubscription?.cancel();
       _connectionStateSubscription = device.connectionState.listen((state) {
-        print('[BLE] Connection state changed: $state');
         if (state == BluetoothConnectionState.disconnected) {
           print('[BLE] ⚠️ DISCONNECTED: Bluetooth connection lost!');
           _handleDisconnection();
@@ -289,14 +316,9 @@ class BleService {
           // Hủy reconnect timer ngay lập tức
           _reconnectTimer?.cancel();
           _reconnectTimer = null;
-          // Không cần setup lại ở đây vì đã setup trong _setupDeviceAfterConnection
-          // Listener này chỉ để cancel reconnect timer
         }
       });
-
-      print('[BLE] ✓ Device setup completed');
     } catch (e) {
-      print('[BLE] Error in device setup: $e');
       _isSettingUp = false;
       rethrow;
     } finally {
@@ -323,7 +345,6 @@ class BleService {
 
     // Auto-reconnect với retry logic
     if (_lastDeviceId != null && !_isConnecting) {
-      print('[BLE] Auto-reconnect sẽ bắt đầu sau 2 giây...');
       _reconnectTimer?.cancel();
       _reconnectTimer = Timer(const Duration(seconds: 2), () {
         _attemptReconnectWithRetry();
@@ -335,23 +356,13 @@ class BleService {
   void _attemptReconnectWithRetry({int attempt = 1, int maxAttempts = 3}) async {
     // Kiểm tra kỹ hơn: nếu đã connected, đang connecting, hoặc đang setting up, không reconnect
     if (_isConnected || _isConnecting || _isSettingUp || _lastDeviceId == null) {
-      if (_isConnected) {
-        print('[BLE] Skip reconnect attempt: already connected');
-      } else if (_isConnecting) {
-        print('[BLE] Skip reconnect attempt: already connecting');
-      } else if (_isSettingUp) {
-        print('[BLE] Skip reconnect attempt: already setting up');
-      }
       return;
     }
 
     try {
       // Tăng thời gian scan mỗi lần retry: 10s, 15s, 20s
       final scanDuration = 10 + (attempt - 1) * 5;
-      print('[BLE] ========================================');
-      print('[BLE] 🔄 Auto-reconnect attempt $attempt/$maxAttempts');
-      print('[BLE] Scan duration: ${scanDuration}s');
-      print('[BLE] ========================================');
+      print('[BLE] 🔄 Auto-reconnect attempt $attempt/$maxAttempts (scan: ${scanDuration}s)');
       
       final success = await _reconnectDirectly(scanDurationSeconds: scanDuration);
       if (success) {
@@ -361,29 +372,22 @@ class BleService {
         throw Exception('Reconnect returned false');
       }
     } catch (e) {
-      print('[BLE] ✗ Auto-reconnect attempt $attempt failed: $e');
-      
       // Retry với thời gian scan dài hơn
       if (attempt < maxAttempts) {
         final nextAttempt = attempt + 1;
         final delaySeconds = 2 * attempt; // Exponential backoff: 2s, 4s, 6s
-        print('[BLE] Retrying in ${delaySeconds}s (attempt ${nextAttempt}/$maxAttempts)...');
         _reconnectTimer?.cancel();
         _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
           _attemptReconnectWithRetry(attempt: nextAttempt, maxAttempts: maxAttempts);
         });
       } else {
         // Sau maxAttempts, fallback về scan by name
-        print('[BLE] ========================================');
-        print('[BLE] ⚠️ Quick reconnect failed after $maxAttempts attempts');
-        print('[BLE] Falling back to scan by name...');
-        print('[BLE] ========================================');
+        print('[BLE] ⚠️ Quick reconnect failed, falling back to scan by name...');
         if (_lastDeviceName != null && !_isConnecting) {
           try {
             await connectToDevice(_lastDeviceName!);
             print('[BLE] ✓ Fallback reconnect by name thành công!');
           } catch (e) {
-            print('[BLE] ✗ Fallback reconnect by name thất bại: $e');
             // Sẽ thử lại lần sau khi detect disconnect
           }
         }
@@ -438,9 +442,6 @@ class BleService {
 
         // Start scanning for the device
         isScanning = true;
-        print('[BLE] Starting scan for device: "$deviceName"');
-        print('[BLE] Scanning for 20 seconds...');
-        
         await FlutterBluePlus.startScan(
           timeout: const Duration(seconds: 20),
           androidUsesFineLocation: true,
@@ -453,7 +454,6 @@ class BleService {
           for (var result in results) {
             final platformName = result.device.platformName;
             final advName = result.device.advName;
-            final remoteId = result.device.remoteId.toString();
             
             // Check both platformName and advName (case insensitive) - ONLY exact match
             final name1 = platformName.toLowerCase();
@@ -462,10 +462,6 @@ class BleService {
             
             // Strict: accept ONLY exact match on advertised or platform name
             if (name1 == searchName || name2 == searchName) {
-              final deviceInfo = 'Name: ${platformName.isNotEmpty ? platformName : advName}, '
-                  'RSSI: ${result.rssi}, '
-                  'ID: $remoteId';
-              print('[BLE] ✓ Found target device: $deviceInfo');
               foundDevice = result.device;
             }
           }
@@ -477,66 +473,44 @@ class BleService {
           await Future.delayed(const Duration(milliseconds: 200));
         }
         
-        print('[BLE] Scan completed');
-        
         await subscription.cancel();
         isScanning = false;
         
         // Stop scan - only if we started it
         try {
           await FlutterBluePlus.stopScan();
-          print('[BLE] Scan stopped');
         } catch (e) {
           // Ignore stop scan errors - already stopped is normal
         }
-        
-        // Wait a bit after stopping scan before connecting
-        await Future.delayed(const Duration(milliseconds: 500));
 
         if (foundDevice == null) {
-          print('[BLE] ERROR: Device "$deviceName" not found!');
           throw Exception('Không tìm thấy thiết bị "$deviceName".\n'
               'Vui lòng kiểm tra:\n'
               '- Thiết bị BLE đã bật và ở gần\n'
               '- Tên thiết bị chính xác: "AgriBeacon BLE"\n'
               '- Thử tắt/bật Bluetooth');
         }
-        
-        print('[BLE] ✓ Device found: ${foundDevice!.platformName.isNotEmpty ? foundDevice!.platformName : foundDevice!.advName}');
-
-        // Wait a bit after finding device before connecting
-        await Future.delayed(const Duration(milliseconds: 500));
 
         // Disconnect device first if it was previously connected (clean state)
         try {
-          print('[BLE] Checking device connection state...');
           final connectionState = await foundDevice!.connectionState.first;
-          print('[BLE] Current connection state: $connectionState');
-          
           if (connectionState == BluetoothConnectionState.connected) {
-            print('[BLE] Device already connected, disconnecting...');
             await foundDevice!.disconnect();
-            // Wait for disconnection to complete
             await foundDevice!.connectionState
                 .where((state) => state == BluetoothConnectionState.disconnected)
                 .first
                 .timeout(const Duration(seconds: 5));
-            print('[BLE] Device disconnected, waiting 2 seconds...');
-            await Future.delayed(const Duration(milliseconds: 2000));
           }
         } catch (e) {
-          print('[BLE] Error checking/disconnecting: $e');
           // Try to disconnect anyway
           try {
             await foundDevice!.disconnect();
-            await Future.delayed(const Duration(milliseconds: 2000));
           } catch (e2) {
             // Ignore
           }
         }
 
         // Connect to the device with retry
-        print('[BLE] Attempting to connect to device...');
         try {
           // Try with autoConnect first (more reliable on Android)
           await foundDevice!.connect(
@@ -544,20 +518,17 @@ class BleService {
             autoConnect: true,
             mtu: 512,
           );
-          print('[BLE] Connect call completed, waiting for connection state...');
         } on fbp.FlutterBluePlusException catch (e) {
           final errorString = e.toString();
           // Check for error code 133 (GATT_ERROR) or ANDROID_SPECIFIC_ERROR
           if (errorString.contains('133') || 
               errorString.contains('ANDROID_SPECIFIC_ERROR') ||
               errorString.contains('ANDROID_SPECIFIC_ERRROR')) {
-            print('[BLE] GATT_ERROR 133 detected, retry count: $retryCount');
             // GATT_ERROR - retry with delay
             if (retryCount < maxRetries - 1) {
               retryCount++;
               // Wait longer before retry (exponential backoff)
               int delayMs = 2000 * retryCount;
-              print('[BLE] Retrying in ${delayMs}ms...');
               await Future.delayed(Duration(milliseconds: delayMs));
               // Disconnect before retry
               try {
@@ -578,17 +549,15 @@ class BleService {
         }
 
         // Wait for connection to be established
-        print('[BLE] Waiting for connection to be established...');
         try {
           await foundDevice!.connectionState
               .where((state) => state == BluetoothConnectionState.connected)
               .first
               .timeout(const Duration(seconds: 10));
-          print('[BLE] ✓ Connection established!');
+          print('[BLE] ✓ Connected to device: ${foundDevice!.platformName.isNotEmpty ? foundDevice!.platformName : foundDevice!.advName}');
         } catch (e) {
           // Check current state
           final currentState = await foundDevice!.connectionState.first;
-          print('[BLE] Connection state after timeout: $currentState');
           if (currentState != BluetoothConnectionState.connected) {
             throw Exception('Connection timeout: device state is $currentState');
           }
@@ -596,62 +565,26 @@ class BleService {
         
         // Explicitly request high MTU (Android only). iOS ignores/auto-negotiates.
         try {
-          print('[BLE] Requesting MTU 517...');
           await foundDevice!.requestMtu(517);
-          print('[BLE] ✓ MTU request issued (requested 517)');
-          await Future.delayed(const Duration(milliseconds: 300));
         } catch (e) {
-          print('[BLE] MTU request not supported or failed: $e');
+          // Ignore MTU errors
         }
 
-        // Discover services - add delay to ensure connection is stable
-        print('[BLE] Waiting 500ms before discovering services...');
-        await Future.delayed(const Duration(milliseconds: 500));
-        print('[BLE] Discovering services...');
+        // Discover services
         List<BluetoothService> services = await foundDevice!.discoverServices();
-        print('[BLE] Found ${services.length} services');
-        
-        // Log all services and characteristics for debugging - DETAILED
-        print('[BLE] ========================================');
         
         // Verify Nordic UART service exists; otherwise: disconnect and retry
         final hasNordicService = services.any((s) => s.uuid.toString().toLowerCase() == nordicServiceUuid);
         if (!hasNordicService) {
-          print('[BLE] ERROR: Expected Nordic UART service ($nordicServiceUuid) NOT found on this device');
           try {
             await foundDevice!.disconnect();
           } catch (_) {}
           throw Exception('Wrong device connected: missing Nordic UART service');
         }
-        print('[BLE] ALL SERVICES AND CHARACTERISTICS:');
-        print('[BLE] ========================================');
-        for (var service in services) {
-          print('[BLE] Service UUID: ${service.uuid}');
-          print('[BLE] Service UUID (lowercase): ${service.uuid.toString().toLowerCase()}');
-          print('[BLE] Number of characteristics: ${service.characteristics.length}');
-          for (var char in service.characteristics) {
-            print('[BLE]   ┌─ Characteristic: ${char.uuid}');
-            print('[BLE]   │  UUID (lowercase): ${char.uuid.toString().toLowerCase()}');
-            print('[BLE]   │  Properties:');
-            print('[BLE]   │    - read: ${char.properties.read}');
-            print('[BLE]   │    - write: ${char.properties.write}');
-            print('[BLE]   │    - notify: ${char.properties.notify}');
-            print('[BLE]   │    - indicate: ${char.properties.indicate}');
-            print('[BLE]   └─────────────────────────────────');
-          }
-        }
-        print('[BLE] ========================================');
         
         // Find characteristics using exact UUIDs from firmware
-        // NOTE: Based on actual BLE properties:
-        // - 6e400003 has notify=true → Use for RECEIVING data FROM device
-        // - 6e400002 has write=true → Use for SENDING data TO device
         BluetoothCharacteristic? characteristic; // For receiving data (notify)
         BluetoothCharacteristic? writeCharacteristic; // For sending data (write)
-        
-        print('[BLE] Looking for Nordic UART characteristics...');
-        print('[BLE] Target RX UUID: $nordicRxUuid (6e400003 - for receiving data, notify=true)');
-        print('[BLE] Target TX UUID: $nordicTxUuid (6e400002 - for sending data, write=true)');
         
         // Find RX characteristic (6e400003) - for receiving data FROM device (has notify=true)
         for (var service in services) {
@@ -659,11 +592,6 @@ class BleService {
             final charUuid = char.uuid.toString().toLowerCase();
             if (charUuid == nordicRxUuid.toLowerCase()) {
               characteristic = char;
-              print('[BLE] ✓ Found RX characteristic (6e400003): ${char.uuid}');
-              print('[BLE]   Properties: read=${char.properties.read}, notify=${char.properties.notify}, indicate=${char.properties.indicate}');
-              if (!char.properties.notify && !char.properties.indicate) {
-                print('[BLE]   ⚠️ WARNING: This characteristic does NOT have notify/indicate!');
-              }
               break;
             }
           }
@@ -676,11 +604,6 @@ class BleService {
             final charUuid = char.uuid.toString().toLowerCase();
             if (charUuid == nordicTxUuid.toLowerCase()) {
               writeCharacteristic = char;
-              print('[BLE] ✓ Found TX characteristic (6e400002): ${char.uuid}');
-              print('[BLE]   Properties: write=${char.properties.write}');
-              if (!char.properties.write) {
-                print('[BLE]   ⚠️ WARNING: This characteristic does NOT have write!');
-              }
               break;
             }
           }
@@ -689,12 +612,10 @@ class BleService {
         
         // Fallback: If exact UUIDs not found, try to find by properties
         if (characteristic == null) {
-          print('[BLE] WARNING: RX UUID not found, trying fallback by properties...');
           for (var service in services) {
             for (var char in service.characteristics) {
               if (char.properties.notify) {
                 characteristic = char;
-                print('[BLE] Found characteristic with notify (fallback): ${char.uuid}');
                 break;
               }
             }
@@ -703,12 +624,10 @@ class BleService {
         }
         
         if (writeCharacteristic == null) {
-          print('[BLE] WARNING: TX UUID not found, trying fallback by properties...');
           for (var service in services) {
             for (var char in service.characteristics) {
               if (char.properties.write) {
                 writeCharacteristic = char;
-                print('[BLE] Found characteristic with write (fallback): ${char.uuid}');
                 break;
               }
             }
@@ -730,95 +649,43 @@ class BleService {
         _isConnected = true;
         _isConnecting = false;
         
-        print('[BLE] Connected to device: $_deviceName');
-        print('[BLE] Device ID saved for quick reconnect: $_lastDeviceId');
-        print('[BLE] Using characteristic for reading: ${characteristic?.uuid ?? "NONE"}');
-        if (writeCharacteristic != null) {
-          print('[BLE] Write characteristic available: ${writeCharacteristic.uuid}');
-        }
-        
+        print('[BLE] ✓ Connected to device: $_deviceName');
         _connectionStatusController.add(true);
-
-        // DEBUG: also subscribe to ALL notify/indicate characteristics to ensure we don't miss data
-        print('[BLE] Checking for any other notifiable characteristics to subscribe (debug) ...');
-        for (final service in services) {
-          for (final ch in service.characteristics) {
-            final isTarget = characteristic != null && ch.uuid == characteristic.uuid;
-            if (!isTarget && (ch.properties.notify || ch.properties.indicate)) {
-              try {
-                print('[BLE] Subscribing (debug) to ${ch.uuid} notify=${ch.properties.notify} indicate=${ch.properties.indicate}');
-                await ch.setNotifyValue(true);
-                // Also write CCCD explicitly
-                await _writeCccdForCharacteristic(ch);
-                final sub = ch.onValueReceived.listen((data) {
-                  final ts = DateTime.now();
-                  print('[BLE DEBUG NOTIFY @${ts.toString()}] from ${ch.uuid} -> len=${data.length} hex=${data.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')}');
-                });
-                _extraNotifySubscriptions.add(sub);
-              } catch (e) {
-                print('[BLE] Could not subscribe (debug) to ${ch.uuid}: $e');
-              }
-            }
-          }
-        }
 
         // Start listening for messages if characteristic supports notify/indicate
         if (characteristic != null && (characteristic.properties.notify || characteristic.properties.indicate)) {
-          print('[BLE] ========================================');
-          print('[BLE] Starting to listen for notifications...');
-          print('[BLE TEST] Listening on characteristic: ${characteristic.uuid}');
-          print('[BLE TEST] Full UUID: ${characteristic.uuid.toString().toLowerCase()}');
-          print('[BLE TEST] Expected RX UUID: $nordicRxUuid');
-          print('[BLE TEST] UUID matches RX (6e400003)? ${characteristic.uuid.toString().toLowerCase() == nordicRxUuid.toLowerCase()}');
-          print('[BLE] ========================================');
           try {
             await startListening();
-            print('[BLE] Successfully started listening');
-            print('[BLE] Listening only. Waiting for device notifications...');
           } catch (e) {
-            print('[BLE] Error starting listening: $e');
+            // Ignore listening errors
           }
         } else if (characteristic != null && characteristic.properties.read) {
-          print('[BLE] Characteristic only supports read, will poll for data');
           // Try reading immediately
           try {
             final data = await characteristic.read();
             if (data.isNotEmpty) {
-              print('[BLE] Initial data read: ${data.length} bytes');
               _processMessage(data);
-            } else {
-              print('[BLE] No initial data available');
             }
           } catch (e) {
-            print('[BLE] Could not read data: $e');
+            // Ignore read errors
           }
           
           // Start polling for data every 500ms
-          print('[BLE] Starting polling timer (every 500ms)...');
           _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) async {
             if (_characteristic == null || !_isConnected) {
-              print('[BLE] Polling stopped: characteristic is null or disconnected');
               timer.cancel();
               return;
             }
             
             try {
-              print('[BLE] Polling: Reading characteristic...');
               final data = await _characteristic!.read();
               if (data.isNotEmpty) {
-                print('[BLE] Polling: Data received: ${data.length} bytes');
                 _processMessage(data);
-              } else {
-                print('[BLE] Polling: No data (0 bytes)');
               }
             } catch (e) {
-              print('[BLE] Polling error: $e');
-              // Don't cancel timer on error, just log and continue
+              // Don't cancel timer on error, just continue
             }
           });
-          print('[BLE] ✓ Polling timer started');
-        } else {
-          print('[BLE] WARNING: No suitable characteristic found for receiving data!');
         }
 
         // Listen for disconnection and auto-reconnect
@@ -826,26 +693,9 @@ class BleService {
         _currentDeviceForListener = foundDevice; // Lưu device reference cho listener
         _connectionStateSubscription?.cancel(); // Cancel subscription cũ nếu có
         
-        print('[BLE] ========================================');
-        print('[BLE] Setting up connection state listener...');
-        print('[BLE] Device: $_lastDeviceName');
-        print('[BLE] ========================================');
-        
         _connectionStateSubscription = foundDevice!.connectionState.listen((state) {
-          // Log tất cả connection state changes để debug
-          print('[BLE] ========================================');
-          print('[BLE] Connection state changed: $state');
-          print('[BLE] Device: $_lastDeviceName');
-          print('[BLE] Time: ${DateTime.now()}');
-          print('[BLE] ========================================');
-          
           if (state == BluetoothConnectionState.disconnected) {
-            // Log khi bị ngắt kết nối
-            print('[BLE] ========================================');
             print('[BLE] ⚠️ DISCONNECTED: Bluetooth connection lost!');
-            print('[BLE] Device: $_lastDeviceName');
-            print('[BLE] Time: ${DateTime.now()}');
-            print('[BLE] ========================================');
             
             // Stop extra notify subscriptions
             for (final s in _extraNotifySubscriptions) {
@@ -865,48 +715,22 @@ class BleService {
             // Tự động reconnect sau 2 giây
             _handleDisconnection();
           } else if (state == BluetoothConnectionState.connected) {
-            print('[BLE] ✓ Connection state: CONNECTED');
             // Hủy reconnect timer ngay lập tức khi detect connected
             _reconnectTimer?.cancel();
             _reconnectTimer = null;
             
             // Nếu device tự động reconnect (autoConnect) nhưng chưa setup, cần setup lại
-            // Chỉ setup nếu thực sự chưa connected hoặc chưa có characteristic
             if (_currentDeviceForListener != null && (!_isConnected || _characteristic == null) && !_isSettingUp) {
-              print('[BLE] Device tự động reconnect, đang setup lại...');
-              // Gọi async function không await (trong listener callback)
-              _setupDeviceAfterConnection(_currentDeviceForListener!).then((_) {
-                print('[BLE] ✓ Setup lại device sau auto-reconnect thành công!');
-              }).catchError((e) {
-                print('[BLE] ✗ Lỗi khi setup lại device: $e');
+              _setupDeviceAfterConnection(_currentDeviceForListener!).catchError((e) {
+                // Ignore setup errors
               });
-            } else {
-              if (_isConnected && _characteristic != null) {
-                print('[BLE] Device đã connected và setup, không cần setup lại');
-              } else if (_isSettingUp) {
-                print('[BLE] Đang setup, không cần setup lại');
-              }
             }
           }
-          // Note: connecting/disconnecting states are deprecated and not streamed by Android/iOS
-        }, onError: (error) {
-          print('[BLE] ========================================');
-          print('[BLE] ERROR in connection state listener: $error');
-          print('[BLE] Time: ${DateTime.now()}');
-          print('[BLE] ========================================');
-        }, onDone: () {
-          print('[BLE] ========================================');
-          print('[BLE] Connection state listener closed');
-          print('[BLE] Time: ${DateTime.now()}');
-          print('[BLE] ========================================');
         });
-        
-        print('[BLE] ✓ Connection state listener setup completed');
 
         return true;
       } on fbp.FlutterBluePlusException catch (e) {
         final errorString = e.toString();
-        print('[BLE Exception] $errorString');
         lastException = Exception('Lỗi BLE: $errorString');
         
         // Retry on connection errors (133, permission errors, etc.)
@@ -916,7 +740,6 @@ class BleService {
           if (retryCount < maxRetries - 1) {
             retryCount++;
             int delayMs = 2000 * retryCount;
-            print('[BLE] Retrying connection in ${delayMs}ms (attempt ${retryCount + 1}/$maxRetries)');
             await Future.delayed(Duration(milliseconds: delayMs));
             continue;
           }
@@ -981,7 +804,7 @@ class BleService {
       
       print('[BLE] Disconnected manually');
     } catch (e) {
-      print('[BLE] Error during disconnect: $e');
+      // Ignore disconnect errors
     }
   }
 
@@ -995,10 +818,7 @@ class BleService {
     final supportsWriteNoResp = ch.properties.writeWithoutResponse;
 
     if (ch.properties.write || supportsWriteNoResp) {
-      print('[BLE] Writing data: ${data.length} bytes, hex: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-      print('[BLE] Writing as string: "${String.fromCharCodes(data)}"');
       await ch.write(data, withoutResponse: supportsWriteNoResp);
-      print('[BLE] ✓ Data written successfully (withoutResponse=${supportsWriteNoResp})');
     } else {
       throw Exception('Characteristic không hỗ trợ ghi dữ liệu');
     }
@@ -1010,131 +830,44 @@ class BleService {
     await writeData(data);
   }
 
-  /// Write string with line ending (e.g., CRLF) to the connected device
-  Future<void> writeStringWithEnding(String message, {String lineEnding = '\\r\\n'}) async {
-    final payload = '$message$lineEnding';
-    await writeString(payload);
-  }
-
-  /// Read data from the connected device
-  Future<List<int>> readData() async {
-    if (_characteristic == null || !_isConnected) {
-      throw Exception('Không có kết nối BLE');
-    }
-
-    if (_characteristic!.properties.read) {
-      return await _characteristic!.read();
-    } else {
-      throw Exception('Characteristic không hỗ trợ đọc dữ liệu');
-    }
-  }
-
-  /// Subscribe to notifications
-  Future<void> subscribeToNotifications(Function(List<int>) onData) async {
-    if (_characteristic == null || !_isConnected) {
-      throw Exception('Không có kết nối BLE');
-    }
-
-    if (_characteristic!.properties.notify) {
-      await _characteristic!.setNotifyValue(true);
-      _valueSubscription = _characteristic!.onValueReceived.listen(onData);
-    } else {
-      throw Exception('Characteristic không hỗ trợ thông báo');
-    }
-  }
-
   /// Start listening for messages from BLE device
   Future<void> startListening() async {
     if (_characteristic == null || !_isConnected) {
-      print('[BLE] Cannot start listening: characteristic=${_characteristic != null}, connected=$_isConnected');
       return;
     }
 
     if (_isListening) {
-      print('[BLE] Already listening, skipping...');
       return;
     }
 
     if (!_characteristic!.properties.notify && !_characteristic!.properties.indicate) {
-      print('[BLE] ERROR: Characteristic ${_characteristic!.uuid} does not support notify/indicate');
-      print('[BLE] Properties: notify=${_characteristic!.properties.notify}, indicate=${_characteristic!.properties.indicate}');
       throw Exception('Characteristic không hỗ trợ thông báo (notify/indicate)');
     }
 
     try {
-      print('[BLE] ========================================');
-      print('[BLE] ENABLING NOTIFICATIONS');
-      print('[BLE] Characteristic UUID: ${_characteristic!.uuid}');
-      print('[BLE] Full UUID: ${_characteristic!.uuid.toString().toLowerCase()}');
-      print('[BLE] Characteristic properties: notify=${_characteristic!.properties.notify}, indicate=${_characteristic!.properties.indicate}');
-      print('[BLE] ========================================');
-      
       // Enable notify or indicate
       if (_characteristic!.properties.notify) {
-        print('[BLE] Calling setNotifyValue(true)...');
         await _characteristic!.setNotifyValue(true);
-        print('[BLE] ✓ setNotifyValue(true) completed');
-        print('[BLE] Waiting 500ms to ensure notify is fully enabled...');
-        await Future.delayed(const Duration(milliseconds: 500));
-        print('[BLE] ✓ Notify should now be fully enabled');
-        // Also write CCCD explicitly for reliability
         await _writeCccdForCharacteristic(_characteristic!);
       } else if (_characteristic!.properties.indicate) {
-        print('[BLE] Calling setNotifyValue(true) for indicate...');
         await _characteristic!.setNotifyValue(true); // Same API for indicate
-        print('[BLE] ✓ setNotifyValue(true) completed');
-        print('[BLE] Waiting 500ms to ensure indicate is fully enabled...');
-        await Future.delayed(const Duration(milliseconds: 500));
-        print('[BLE] ✓ Indicate should now be fully enabled');
-        // Also write CCCD explicitly for reliability
         await _writeCccdForCharacteristic(_characteristic!);
       }
       
       _isListening = true;
-      print('[BLE] Notifications enabled, waiting for data...');
       
-      // Listen for incoming data - log EVERYTHING with timestamp
-      print('[BLE] Setting up onValueReceived listener...');
-      _dataReceivedCount = 0; // Reset counter
+      // Listen for incoming data
       _valueSubscription = _characteristic!.onValueReceived.listen((data) {
-        _dataReceivedCount++;
-        final timestamp = DateTime.now();
-        print('[BLE] ========================================');
-        print('[BLE] ===== DATA RECEIVED #$_dataReceivedCount @${timestamp.toString()} =====');
-        print('[BLE DATA RECEIVED #$_dataReceivedCount @${timestamp.toString()}] ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-        print('[BLE] Received data: ${data.length} bytes');
-        if (data.isEmpty) {
-          print('[BLE] ⚠️ WARNING: Received 0 bytes - this might be a notification trigger without data');
-        } else {
-          print('[BLE] ✓ Received ${data.length} bytes of actual data!');
+        if (data.isNotEmpty) {
+          _processMessage(data);
         }
-        print('[BLE] Raw bytes: ${data.join(', ')}');
-        print('[BLE] Hex: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-        _processMessage(data);
-        print('[BLE] ========================================');
       }, onError: (error) {
-        final timestamp = DateTime.now();
-        print('[BLE] ========================================');
-        print('[BLE] ERROR in data stream @${timestamp.toString()}: $error');
-        print('[BLE] Error type: ${error.runtimeType}');
-        print('[BLE] Stack trace: ${StackTrace.current}');
-        print('[BLE] ========================================');
+        // Ignore stream errors
       }, onDone: () {
-        final timestamp = DateTime.now();
-        print('[BLE] ========================================');
-        print('[BLE] Data stream closed @${timestamp.toString()}');
-        print('[BLE] Total data received: $_dataReceivedCount times');
-        print('[BLE] ========================================');
         _isListening = false;
       });
-      print('[BLE] ✓ onValueReceived listener is now active');
-      print('[BLE] Listener will trigger whenever device sends data via notify');
-      
-      print('[BLE] ✓ Listening started successfully - ready to receive data!');
     } catch (e) {
       _isListening = false;
-      print('[BLE] ERROR starting listening: $e');
-      print('[BLE] Stack trace: ${StackTrace.current}');
       throw Exception('Lỗi khi bắt đầu lắng nghe: $e');
     }
   }
@@ -1148,114 +881,87 @@ class BleService {
     }
   }
 
-  /// Process incoming message data - LOG EVERYTHING
+  /// Process incoming message data
   void _processMessage(List<int> data) {
-    print('[BLE] _processMessage called with ${data.length} bytes');
-    
     // Try UTF-8 decode first
     try {
       String message = utf8.decode(data);
-      print('[BLE] UTF-8 decoded: "$message"');
-      print('[BLE] Message length: ${message.length}');
-      print('[BLE] Message bytes: ${message.codeUnits.join(', ')}');
       
       // Append to buffer (handle fragmented packets)
       _messageBuffer.write(message);
       final bufferStr = _messageBuffer.toString();
-      print('[BLE] Buffer after write: "$bufferStr"');
 
-      // Only process complete lines (terminated by \n). If no newline yet, wait for next packets.
+      // Only process complete lines (terminated by \n)
       final lastNewline = bufferStr.lastIndexOf('\n');
       if (lastNewline == -1) {
-        print('[BLE] No newline found yet - waiting for more data');
         return;
       }
 
       // Separate complete part and remainder
       final completePart = bufferStr.substring(0, lastNewline);
-      final remainder = bufferStr.substring(lastNewline + 1); // after \n
-      // Keep remainder (incomplete line) in buffer
+      final remainder = bufferStr.substring(lastNewline + 1);
       _messageBuffer
         ..clear()
         ..write(remainder);
 
-      // Split and process each complete line
+      // Process each complete line
       final lines = completePart.split('\n');
-      for (int i = 0; i < lines.length; i++) {
-        final line = lines[i].trim();
-        if (line.isEmpty) {
-          continue;
-        }
-        _eventBus.emitRawMessage(line);
-        _parseAndRouteMessage(line);
+      for (final line in lines) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        
+        _parseAndRouteMessage(trimmed);
       }
     } catch (e) {
-      print('[BLE ERROR] UTF-8 decode failed: $e');
       // Try to decode as ASCII if UTF-8 fails
       try {
         String message = String.fromCharCodes(data);
         _messageBuffer.write(message);
         final bufferStr = _messageBuffer.toString();
         final lastNewline = bufferStr.lastIndexOf('\n');
-        if (lastNewline == -1) {
-          return;
-        }
+        if (lastNewline == -1) return;
+        
         final completePart = bufferStr.substring(0, lastNewline);
         final remainder = bufferStr.substring(lastNewline + 1);
         _messageBuffer
           ..clear()
           ..write(remainder);
+        
         final lines = completePart.split('\n');
         for (final line in lines) {
           final l = line.trim();
           if (l.isEmpty) continue;
-          _eventBus.emitRawMessage(l);
           _parseAndRouteMessage(l);
         }
       } catch (e2) {
-        print('[BLE ERROR] ASCII decode also failed: $e2');
-        // Print everything we can
-        print('[BLE] Raw bytes: ${data.join(', ')}');
-        print('[BLE] Hex: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
-        print('[BLE] As string from codes: "${String.fromCharCodes(data)}"');
+        // Ignore decode errors
       }
     }
   }
 
-  /// Parse message and route to appropriate handler
-  void _parseAndRouteMessage(String message) {
-    // Log giá trị nhận được (chỉ log giá trị, không có text)
-    print(message);
+  /// Parse message and route to appropriate handler (using new parser)
+  void _parseAndRouteMessage(String message) {    
+    // Use message parser to extract event type and data
+    final parsed = _messageParser.parse(message);
+    if (parsed == null) return;
     
-    // HOME message
-    if (message.startsWith('HOME:')) {
-      String data = message.substring(5).trim(); // Remove "HOME:" prefix
-      _eventBus.emitHome(data);
-      return;
-    }
-    // WP (Waypoint) message
-    else if (message.startsWith('WP:')) {
-      String data = message.substring(3).trim(); // Remove "WP:" prefix
-      _eventBus.emitWp(data);
-    }
-    // STATUS message
-    else if (message.startsWith('STATUS:')) {
-      String data = message.substring(7).trim(); // Remove "STATUS:" prefix
-      _eventBus.emitStatus(data);
-    }
-    // BATTERY message
-    else if (message.startsWith('BATTERY:')) {
-      String data = message.substring(8).trim(); // Remove "BATTERY:" prefix
-      _eventBus.emitBattery(data);
-    }
-    // EKF message
-    else if (message.startsWith('EKF:')) {
-      String data = message.substring(4).trim(); // Remove "EKF:" prefix
-      _eventBus.emitEfk(data);
-    }
-    // Unknown message format - chỉ log giá trị (đã log ở đầu hàm)
-    else {
-      // Do not emit raw again here to avoid duplication
+    final eventType = parsed['event']!;
+    final data = parsed['data']!;
+    
+    // Emit to new event handler (clean pattern)
+    _eventHandler.emit(eventType, data);
+    
+    // Also emit to EventBus for backward compatibility
+    switch (eventType.toUpperCase()) {
+      case 'HOME':
+        _eventBus.emitHome(data);
+        break;
+      case 'WP':
+        _eventBus.emitWp(data);
+        break;
+      case 'STATUS':
+        _eventBus.emitStatus(data);
+        break;
     }
   }
 
@@ -1267,7 +973,6 @@ class BleService {
     stopListening();
     _valueSubscription?.cancel();
     _connectionStatusController.close();
-    // EventBus will be disposed separately if needed
   }
 }
 

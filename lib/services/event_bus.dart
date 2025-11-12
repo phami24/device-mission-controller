@@ -43,17 +43,10 @@ class EventBus {
   final _homeEventController = StreamController<BleHomeEvent>.broadcast();
   final _wpEventController = StreamController<BleWpEvent>.broadcast();
   final _statusEventController = StreamController<BleStatusEvent>.broadcast();
-  final _batteryEventController = StreamController<BleBatteryEvent>.broadcast();
-  final _ekfEventController = StreamController<BleEfkEvent>.broadcast();
-  final _rawMessageEventController = StreamController<BleRawMessageEvent>.broadcast();
-
   // Public streams
   Stream<BleHomeEvent> get onHome => _homeEventController.stream;
   Stream<BleWpEvent> get onWp => _wpEventController.stream;
-  Stream<BleStatusEvent> get onStatus => _statusEventController.stream;
-  Stream<BleBatteryEvent> get onBattery => _batteryEventController.stream;
-  Stream<BleEfkEvent> get onEfk => _ekfEventController.stream;
-  Stream<BleRawMessageEvent> get onRawMessage => _rawMessageEventController.stream;
+  Stream<BleStatusEvent> get onStatus => _statusEventController.stream; 
 
   /// Emit HOME event
   void emitHome(String data) {
@@ -70,28 +63,11 @@ class EventBus {
     _statusEventController.add(BleStatusEvent(data));
   }
 
-  /// Emit BATTERY event
-  void emitBattery(String data) {
-    _batteryEventController.add(BleBatteryEvent(data));
-  }
-
-  /// Emit EKF event
-  void emitEfk(String data) {
-    _ekfEventController.add(BleEfkEvent(data));
-  }
-
-  /// Emit raw message event
-  void emitRawMessage(String message) {
-    _rawMessageEventController.add(BleRawMessageEvent(message));
-  }
 
   void dispose() {
     _homeEventController.close();
     _wpEventController.close();
     _statusEventController.close();
-    _batteryEventController.close();
-    _ekfEventController.close();
-    _rawMessageEventController.close();
   }
 }
 

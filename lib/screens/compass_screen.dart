@@ -4,12 +4,271 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import '../widgets/compass_arrow.dart';
-import '../utils/path_generator.dart';
+import '../services/path_generator.dart';
 import '../services/ble_service.dart';
 import '../services/event_bus.dart';
 
-// Undo state class
+// ============================================================================
+// Mission Progress Dialog Widget - Hiển thị tiến độ nhiệm vụ với StreamSubscription
+// ============================================================================
+class _MissionProgressDialog extends StatefulWidget {
+  final int wpDone;
+  final int wpTotal;
+  final DateTime? dialogOpenTime;
+  final bool forceLoading;
+  final EventBus eventBus;
+  final VoidCallback onClose;
+
+  const _MissionProgressDialog({
+    required this.wpDone,
+    required this.wpTotal,
+    required this.dialogOpenTime,
+    required this.forceLoading,
+    required this.eventBus,
+    required this.onClose,
+  });
+
+  @override
+  State<_MissionProgressDialog> createState() => _MissionProgressDialogState();
+}
+
+class _MissionProgressDialogState extends State<_MissionProgressDialog> {
+  int _wpDone = 0;
+  int _wpTotal = 0;
+  StreamSubscription<BleWpEvent>? _wpSubscription;
+  Timer? _closeTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _wpDone = widget.wpDone;
+    _wpTotal = widget.wpTotal;
+    
+    // Listen to WP events via StreamSubscription
+    _wpSubscription = widget.eventBus.onWp.listen((event) {
+      final raw = event.data.trim();
+      final text = raw.contains(':') ? raw.split(':').last : raw;
+      final parts = text.split('/');
+      
+      if (parts.length == 2) {
+        final a = int.tryParse(parts[0].trim()) ?? 0;
+        final b = int.tryParse(parts[1].trim()) ?? 0;
+        
+        setState(() {
+          _wpDone = a.clamp(0, b);
+          _wpTotal = b;
+        });
+        
+        // Trường hợp 0/0: đợi 3s rồi đóng
+        if (a == 0 && b == 0) {
+          _closeTimer?.cancel();
+          _closeTimer = Timer(const Duration(seconds: 3), () {
+            if (mounted && _wpDone == 0 && _wpTotal == 0) {
+              // Đóng dialog trước, sau đó cập nhật state
+              if (Navigator.of(context).canPop()) {
+                Navigator.of(context).pop(); // Đóng dialog
+              }
+              // Cập nhật state sau khi đóng dialog
+              widget.onClose();
+            }
+          });
+        }
+        
+        // Khi hoàn thành (a == b > 0): đợi 1s rồi đóng (sau khi đã mở ít nhất 3s)
+        if (_wpDone == _wpTotal && _wpTotal > 0) {
+          final bool dialogOpenedLongEnough = widget.dialogOpenTime != null && 
+              DateTime.now().difference(widget.dialogOpenTime!).inSeconds >= 3;
+          
+          if (dialogOpenedLongEnough) {
+            _closeTimer?.cancel();
+            _closeTimer = Timer(const Duration(seconds: 1), () {
+              if (mounted && _wpDone == _wpTotal && _wpTotal > 0) {
+                // Đóng dialog trước, sau đó cập nhật state
+                if (Navigator.of(context).canPop()) {
+                  Navigator.of(context).pop(); // Đóng dialog
+                }
+                // Cập nhật state sau khi đóng dialog
+                widget.onClose();
+              }
+            });
+          }
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _wpSubscription?.cancel();
+    _closeTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Tính toán display values
+    final bool hasProgress = _wpTotal > _wpDone && _wpTotal > 0;
+    final bool showLoading = widget.dialogOpenTime != null && 
+        DateTime.now().difference(widget.dialogOpenTime!).inSeconds < 3 &&
+        !hasProgress;
+    
+    final bool isComplete = (_wpTotal > 0) && (_wpDone == _wpTotal);
+    final bool forceLoading = widget.forceLoading && (_wpDone == _wpTotal);
+    final int displayDone = showLoading ? 0 : _wpDone;
+    final int displayTotal = showLoading ? 0 : (forceLoading ? _wpTotal : _wpTotal);
+    final progress = (displayTotal > 0) ? (displayDone / displayTotal).clamp(0.0, 1.0) : 0.0;
+    
+    return AlertDialog(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      title: const Row(
+        children: [
+          Icon(Icons.flight, color: Color(0xff2e7d32)),
+          SizedBox(width: 8),
+          Text('Tiến độ nhiệm vụ'),
+        ],
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Hiển thị loading trong 3s đầu, sau đó hiển thị giá trị wp
+          if (showLoading) ...[
+            const SizedBox(
+              width: 120,
+              height: 120,
+              child: Center(
+                child: CircularProgressIndicator(
+                  strokeWidth: 8,
+                  valueColor: AlwaysStoppedAnimation<Color>(Color(0xff2e7d32)),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Đang tải...',
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey.shade700,
+              ),
+            ),
+          ] else ...[
+            // a/b ở trên cùng
+            Text(
+              '$displayDone/$displayTotal',
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Color(0xff2e7d32),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Circular progress indicator
+            SizedBox(
+              width: 120,
+              height: 120,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CircularProgressIndicator(
+                    value: progress,
+                    strokeWidth: 8,
+                    backgroundColor: Colors.grey.shade300,
+                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xff2e7d32)),
+                  ),
+                  Text(
+                    '${(progress * 100).toStringAsFixed(0)}%',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              forceLoading
+                  ? 'Đang tải đường bay lên...'
+                  : (isComplete ? 'Hoàn thành!' : 'Đang tải đường bay lên...'),
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey.shade700,
+              ),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        // Close button (only show when done)
+        if (_wpDone == _wpTotal && _wpTotal > 0)
+          TextButton(
+            onPressed: () {
+              widget.onClose();
+              Navigator.of(context).pop();
+            },
+            child: const Text('Đóng'),
+          ),
+      ],
+    );
+  }
+}
+
+// ============================================================================
+// Compass Arrow Widget - Hiển thị la bàn với vòng ngoài cố định và vòng trong xoay
+// ============================================================================
+class CompassArrow extends StatelessWidget {
+  /// Bearing angle in degrees (góc xoay của vòng trong)
+  final double bearingDeg;
+  /// Highlight north direction (tô sáng hướng bắc)
+  final bool highlightNorth;
+  
+  const CompassArrow({
+    super.key,
+    required this.bearingDeg,
+    this.highlightNorth = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = math.min(constraints.maxWidth, constraints.maxHeight);
+        return SizedBox(
+          width: size,
+          height: size,
+          child: Stack(
+            children: [
+              // Outer ring (fixed) - geo_north (vòng lớn bên ngoài, đứng yên) - viền hồng
+              Image.asset(
+                'lib/assets/nautical_compass_rose_geo_north.png',
+                width: size,
+                height: size,
+                fit: BoxFit.contain,
+              ),
+              // Inner ring (rotating) - mag_north (vòng nhỏ bên trong, xoay theo bearing)
+              Transform.rotate(
+                angle: bearingDeg * math.pi / 180.0,
+                alignment: Alignment.center,
+                child: Image.asset(
+                  'lib/assets/nautical_compass_rose_mag_north.png',
+                  width: size,
+                  height: size,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ============================================================================
+// Undo State Class - Lưu trữ state để hoàn tác
+// ============================================================================
 class _UndoState {
   final List<LatLng> points;
   final List<List<LatLng>> acceptedPolygons;
@@ -34,8 +293,10 @@ class _DraggableMarker extends Marker {
     required Function(int, LatLng) onDragEnd,
     required MapController mapController,
     required bool disabled,
+    required bool isDeleteMode,
     VoidCallback? onDragStart,
     VoidCallback? onDragEndCallback,
+    Function(int)? onTap,
   }) : super(
           point: point,
           width: 28, // Tăng kích thước để dễ kéo thả
@@ -46,8 +307,10 @@ class _DraggableMarker extends Marker {
             onDragEnd: onDragEnd,
             mapController: mapController,
             disabled: disabled,
+            isDeleteMode: isDeleteMode,
             onDragStart: onDragStart,
             onDragEndCallback: onDragEndCallback,
+            onTap: onTap,
           ),
         );
 }
@@ -58,8 +321,10 @@ class _DraggableMarkerWidget extends StatefulWidget {
   final Function(int, LatLng) onDragEnd;
   final MapController mapController;
   final bool disabled;
+  final bool isDeleteMode;
   final VoidCallback? onDragStart;
   final VoidCallback? onDragEndCallback;
+  final Function(int)? onTap;
 
   const _DraggableMarkerWidget({
     required this.point,
@@ -67,8 +332,10 @@ class _DraggableMarkerWidget extends StatefulWidget {
     required this.onDragEnd,
     required this.mapController,
     required this.disabled,
+    required this.isDeleteMode,
     this.onDragStart,
     this.onDragEndCallback,
+    this.onTap,
   });
 
   @override
@@ -80,6 +347,8 @@ class _DraggableMarkerWidgetState extends State<_DraggableMarkerWidget> {
   bool _isPressed = false; // Track khi nhấn vào marker
   LatLng? _dragStartPoint; // Lưu vị trí ban đầu khi bắt đầu drag
   Offset? _pointerStartPosition; // Lưu vị trí pointer ban đầu
+  bool _hasMoved = false; // Track xem đã move chưa để phân biệt tap và drag
+  bool _isTapped = false; // Track khi tap (để block map tap ngay lập tức)
 
   @override
   Widget build(BuildContext context) {
@@ -102,59 +371,90 @@ class _DraggableMarkerWidgetState extends State<_DraggableMarkerWidget> {
       onPointerDown: (event) {
         setState(() {
           _isPressed = true;
-          _isDragging = true; // Bắt đầu drag ngay khi nhấn vào
+          _isDragging = false; // Chưa drag, chờ move
+          _hasMoved = false; // Reset flag move
+          _isTapped = true; // Đánh dấu đã tap (để block map tap ngay lập tức)
           _pointerStartPosition = event.position;
           _dragStartPoint = widget.point; // Lưu vị trí ban đầu
         });
-        // Notify parent để disable map interaction ngay
+        // Notify parent để block map tap ngay khi tap vào marker
         widget.onDragStart?.call();
       },
       onPointerMove: (event) {
-        if (_pointerStartPosition == null || _dragStartPoint == null || !_isDragging) return;
+        if (_pointerStartPosition == null || _dragStartPoint == null) return;
+        // Block drag khi đang ở chế độ xóa
+        if (widget.isDeleteMode) return;
         
-        // Get map camera
-        final camera = widget.mapController.camera;
-        final zoom = camera.zoom;
+        // Tính khoảng cách di chuyển từ vị trí ban đầu
+        final dx = event.position.dx - _pointerStartPosition!.dx;
+        final dy = event.position.dy - _pointerStartPosition!.dy;
+        final distance = math.sqrt(dx * dx + dy * dy);
         
-        // Dùng delta từ event để mượt hơn (delta từ lần move trước)
-        final deltaX = event.delta.dx;
-        final deltaY = event.delta.dy;
-        
-        // Convert pixel offset to lat/lng offset using Web Mercator projection
-        final metersPerPixel = 156543.03392 * math.cos(_dragStartPoint!.latitude * math.pi / 180) / math.pow(2, zoom);
-        
-        // Convert meters to degrees
-        final metersPerDegreeLat = 111320.0;
-        final metersPerDegreeLng = 111320.0 * math.cos(_dragStartPoint!.latitude * math.pi / 180);
-        
-        // Calculate offset from pointer delta
-        final latOffset = -deltaY * metersPerPixel / metersPerDegreeLat;
-        final lngOffset = deltaX * metersPerPixel / metersPerDegreeLng;
-        
-        // Cập nhật vị trí ban đầu để tính toán tiếp theo dựa trên vị trí hiện tại
-        final newLat = _dragStartPoint!.latitude + latOffset;
-        final newLng = _dragStartPoint!.longitude + lngOffset;
-        
-        // Clamp to valid lat/lng range
-        final clampedLat = newLat.clamp(-90.0, 90.0);
-        final clampedLng = newLng.clamp(-180.0, 180.0);
-        
-        final newPosition = LatLng(clampedLat, clampedLng);
-        
-        // Cập nhật _dragStartPoint để lần move tiếp theo tính từ vị trí mới
-        _dragStartPoint = newPosition;
-        _pointerStartPosition = event.position;
-        
-        // Update position immediately during drag
-        widget.onDragEnd(widget.index, newPosition);
+        // Nếu move quá 5px thì coi là drag
+        if (distance > 5.0) {
+          if (!_hasMoved) {
+            // Lần đầu move: bắt đầu drag
+            setState(() {
+              _isDragging = true;
+              _hasMoved = true;
+              _isTapped = false; // Không phải tap nữa, là drag
+            });
+          }
+          
+          // Get map camera
+          final camera = widget.mapController.camera;
+          final zoom = camera.zoom;
+          
+          // Dùng delta từ event để mượt hơn (delta từ lần move trước)
+          final deltaX = event.delta.dx;
+          final deltaY = event.delta.dy;
+          
+          // Convert pixel offset to lat/lng offset using Web Mercator projection
+          final metersPerPixel = 156543.03392 * math.cos(_dragStartPoint!.latitude * math.pi / 180) / math.pow(2, zoom);
+          
+          // Convert meters to degrees
+          final metersPerDegreeLat = 111320.0;
+          final metersPerDegreeLng = 111320.0 * math.cos(_dragStartPoint!.latitude * math.pi / 180);
+          
+          // Calculate offset from pointer delta
+          final latOffset = -deltaY * metersPerPixel / metersPerDegreeLat;
+          final lngOffset = deltaX * metersPerPixel / metersPerDegreeLng;
+          
+          // Cập nhật vị trí ban đầu để tính toán tiếp theo dựa trên vị trí hiện tại
+          final newLat = _dragStartPoint!.latitude + latOffset;
+          final newLng = _dragStartPoint!.longitude + lngOffset;
+          
+          // Clamp to valid lat/lng range
+          final clampedLat = newLat.clamp(-90.0, 90.0);
+          final clampedLng = newLng.clamp(-180.0, 180.0);
+          
+          final newPosition = LatLng(clampedLat, clampedLng);
+          
+          // Cập nhật _dragStartPoint để lần move tiếp theo tính từ vị trí mới
+          _dragStartPoint = newPosition;
+          _pointerStartPosition = event.position;
+          
+          // Update position immediately during drag
+          widget.onDragEnd(widget.index, newPosition);
+        }
       },
       onPointerUp: (event) {
+        final wasTap = !_hasMoved && _isTapped;
+        
         setState(() {
           _isPressed = false;
           _isDragging = false;
+          _hasMoved = false;
+          _isTapped = false;
           _pointerStartPosition = null;
           _dragStartPoint = null;
         });
+        
+        // Nếu không move (tap) thì gọi onTap
+        if (wasTap && widget.onTap != null) {
+          widget.onTap!(widget.index);
+        }
+        
         // Notify parent để enable lại map interaction
         widget.onDragEndCallback?.call();
       },
@@ -162,6 +462,8 @@ class _DraggableMarkerWidgetState extends State<_DraggableMarkerWidget> {
         setState(() {
           _isPressed = false;
           _isDragging = false;
+          _hasMoved = false;
+          _isTapped = false;
           _pointerStartPosition = null;
           _dragStartPoint = null;
         });
@@ -221,7 +523,7 @@ class _ZeroDegreeIndicatorPainter extends CustomPainter {
     final ey = center.dy + math.sin(rad) * (radius + 8);
     final paint = Paint()
       ..color = Colors.white
-      ..strokeWidth = 3
+      ..strokeWidth = 1.0
       ..strokeCap = StrokeCap.round;
     canvas.drawLine(Offset(sx, sy), Offset(ex, ey), paint);
   }
@@ -266,6 +568,9 @@ class _CompassScreenState extends State<CompassScreen> {
   List<LatLng> _waypointPath = [];
   bool _hasWaypoints = false; // Track if waypoints have been generated
   
+  // Delete mode (toggle ON/OFF để xóa từng điểm)
+  bool _isDeleteMode = false; // Chế độ xóa ON/OFF
+  
   // Home point comes from BLE HOME event only
   LatLng? _selectedHomePoint;
   bool _hasFocusedHome = false; // Track xem đã focus HOME lần đầu chưa
@@ -282,30 +587,26 @@ class _CompassScreenState extends State<CompassScreen> {
   StreamSubscription<bool>? _bleConnectionSubscription;
   Timer? _bleReconnectTimer;
   
-  // BLE message subscriptions via EventBus
+  // BLE message subscriptions via EventBus (backward compatible)
+  // Can also use: _bleService.on.on("HOME", (data) => ...) for clean pattern
   final EventBus _eventBus = EventBus();
   StreamSubscription<BleHomeEvent>? _homeEventSubscription;
   StreamSubscription<BleWpEvent>? _wpEventSubscription;
   StreamSubscription<BleStatusEvent>? _statusEventSubscription;
-  StreamSubscription<BleBatteryEvent>? _batteryEventSubscription;
-  StreamSubscription<BleEfkEvent>? _ekfEventSubscription;
   
   // Mission progress
   int _wpDone = 0;
   int _wpTotal = 0;
   bool _isMissionDialogOpen = false;
-  bool _isUploading = false; // Track trạng thái upload đang xoay
-  String _lastMissionCmd = ''; // Lưu câu lệnh MISSION_SCAN để hiển thị trong dialog
-  bool _suppressMissionDialog = false; // Không hiển thị lại sau khi auto tắt
   bool _forceLoading = false; // Ép dialog hiển thị loading dù a==b
-  bool _hidePolygons = false; // Ẩn lớp polygon khi nhiệm vụ hoàn thành
   DateTime? _dialogOpenTime; // Thời gian mở dialog để tính loading 3s
+  Timer? _wpDialogTimer; // Timer để đóng dialog sau 3s nếu 0/0
+  
+  // Delete dialog state
+  bool _isDeleteDialogOpen = false; // Track khi dialog xóa đang mở
 
   // Status: 0 = chưa sẵn sàng, 1 = sẵn sàng
   int _status = 0; // Lưu status từ BLE để hiển thị chấm trạng thái
-
-  // TX command sender
-  final TextEditingController _txController = TextEditingController();
 
   // Compass drag state (deprecated: using joystick knob)
 
@@ -366,7 +667,7 @@ class _CompassScreenState extends State<CompassScreen> {
     if (_isBleConnected) return;
     // show header text while connecting; no extra overlay state
     try {
-      await _bleService.connectToDevice('AgriBeacon DRONE');
+      await _bleService.connectToDevice('AgriBeacon BLE');
     } catch (_) {
       // BleService may retry internally
     } finally {
@@ -450,10 +751,13 @@ class _CompassScreenState extends State<CompassScreen> {
           _wpDone = a.clamp(0, b);
           _wpTotal = b;
         });
-        // Trường hợp 0/0: nếu dialog đang mở, chờ 3s rồi đóng (nếu vẫn 0/0)
+        // Trường hợp 0/0: nếu dialog đang mở, dùng Timer.periodic để check và đóng sau 3s
         if (a == 0 && b == 0 && mounted) {
           if (_isMissionDialogOpen) {
-            Future.delayed(const Duration(seconds: 3), () {
+            // Hủy timer cũ nếu có
+            _wpDialogTimer?.cancel();
+            // Tạo timer mới để check sau 3s
+            _wpDialogTimer = Timer(const Duration(seconds: 3), () {
               if (!mounted) return;
               if (_wpDone == 0 && _wpTotal == 0 && _isMissionDialogOpen) {
                 _hideMissionProgressDialog();
@@ -493,22 +797,16 @@ class _CompassScreenState extends State<CompassScreen> {
         _status = statusInt.clamp(0, 1);
       });
     });
-
-    _batteryEventSubscription = _eventBus.onBattery.listen((event) {});
-
-    _ekfEventSubscription = _eventBus.onEfk.listen((event) {});
   }
 
   @override
   void dispose() {
     _bleConnectionSubscription?.cancel();
     _bleReconnectTimer?.cancel();
+    _wpDialogTimer?.cancel(); // Hủy timer dialog
     _homeEventSubscription?.cancel();
     _wpEventSubscription?.cancel();
     _statusEventSubscription?.cancel();
-    _batteryEventSubscription?.cancel();
-    _ekfEventSubscription?.cancel();
-    _txController.dispose();
     super.dispose();
   }
 
@@ -655,6 +953,13 @@ class _CompassScreenState extends State<CompassScreen> {
     if (_acceptedPolygons.isNotEmpty) return;
     // Block editing when preview is active (must undo preview first)
     if (_hasWaypoints) return;
+    // Block drawing when delete dialog is open
+    if (_isDeleteDialogOpen) return;
+    // Block drawing when in delete mode - show notification
+    if (_isDeleteMode) {
+      _showInfoDialog('Thông báo', 'Đang trong chế độ xóa điểm. Hãy tắt chế độ xóa để vẽ thêm điểm.');
+      return;
+    }
     _saveState(); // Lưu state trước khi thêm điểm
     setState(() {
       _points.add(latlng);
@@ -683,6 +988,8 @@ class _CompassScreenState extends State<CompassScreen> {
     if (_acceptedPolygons.isNotEmpty) return;
     // Block editing when preview is active (must undo preview first)
     if (_hasWaypoints) return;
+    // Block dragging when in delete mode
+    if (_isDeleteMode) return;
     // Bỏ giới hạn 1km quanh HOME khi kéo điểm
     setState(() {
       _points[index] = newPosition;
@@ -715,6 +1022,7 @@ class _CompassScreenState extends State<CompassScreen> {
                 _undoHistory.clear(); // Xóa history khi clear all
                 _wpDone = 0;
                 _wpTotal = 0;
+                _isDeleteMode = false; // Reset delete mode khi xóa tất cả
               });
             },
             child: const Text('Xóa'),
@@ -804,6 +1112,7 @@ class _CompassScreenState extends State<CompassScreen> {
           ? _waypoints.sublist(0, _waypoints.length - 1) 
           : _waypoints;
       _hasWaypoints = true; // Mark that waypoints have been generated
+      _isDeleteMode = false; // Reset delete mode khi preview (nút sẽ tự ẩn)
     });
 
     // Log waypoints (similar to web version)
@@ -839,10 +1148,8 @@ class _CompassScreenState extends State<CompassScreen> {
     final bearingInt = _normalizedBearingDeg.round();
     final missionCmd = 'MISSION_SCAN$altInt::$bearingInt::$encoded';
     
-    // Lưu câu lệnh để hiển thị trong dialog
     // Reset WP progress trước khi upload mới để tránh hiển thị giá trị cũ
     setState(() {
-      _lastMissionCmd = missionCmd;
       _wpDone = 0;
       _wpTotal = 0;
     });
@@ -853,7 +1160,7 @@ class _CompassScreenState extends State<CompassScreen> {
       // ignore: avoid_print
       print('Đã gửi lệnh MISSION_SCAN qua BLE: $missionCmd');
       // Mở dialog ngay lập tức (kể cả a == b) để hiển thị trạng thái
-      _suppressMissionDialog = false; // cho phép hiển thị lại trong lượt upload này
+      // _suppressMissionDialog = false; // cho phép hiển thị lại trong lượt upload này
       _forceLoading = (_wpDone == _wpTotal); // nếu a==b, ép loading
       if (!_isMissionDialogOpen) {
         _showMissionProgressDialog();
@@ -896,6 +1203,59 @@ class _CompassScreenState extends State<CompassScreen> {
         );
       },
     );
+  }
+
+  /// Show dialog xác nhận xóa điểm
+  void _showDeletePointDialog(int index) {
+    setState(() {
+      _isDeleteDialogOpen = true; // Đánh dấu dialog đang mở
+    });
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Xóa điểm'),
+          content: const Text('Bạn có chắc muốn xóa điểm này?'),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                setState(() {
+                  _isDeleteDialogOpen = false; // Đóng dialog
+                });
+              },
+              child: const Text('Hủy'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                setState(() {
+                  _isDeleteDialogOpen = false; // Đóng dialog
+                });
+                _removePoint(index);
+              },
+              child: const Text('Xóa', style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        );
+      },
+    ).then((_) {
+      // Đảm bảo reset flag khi dialog đóng (kể cả khi tap outside)
+      if (mounted) {
+        setState(() {
+          _isDeleteDialogOpen = false;
+        });
+      }
+    });
+  }
+
+  /// Xóa điểm tại index
+  void _removePoint(int index) {
+    if (index < 0 || index >= _points.length) return;
+    _saveState(); // Lưu state trước khi xóa
+    setState(() {
+      _points.removeAt(index);
+    });
   }
 
   // Start: gửi lệnh START qua BLE
@@ -943,174 +1303,13 @@ class _CompassScreenState extends State<CompassScreen> {
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            // Update dialog periodically to reflect progress changes
-            void updateDialog() {
-              if (mounted && _isMissionDialogOpen) {
-                setDialogState(() {});
-                // Schedule next update
-                Future.delayed(const Duration(milliseconds: 200), () {
-                  if (mounted && _isMissionDialogOpen) {
-                    updateDialog();
-                  }
-                });
-              }
-            }
-            // Start periodic updates
-            Future.delayed(const Duration(milliseconds: 200), updateDialog);
-            
-            // Kiểm tra xem đã qua 3 giây chưa
-            // Trong 3s đầu: nếu có progress mới (b > a) thì hiển thị ngay, không cần chờ hết 3s
-            // Chỉ hiển thị loading nếu chưa có progress mới (để tránh hiển thị WP event cũ như 84/84)
-            final bool hasProgress = _wpTotal > _wpDone && _wpTotal > 0;
-            final bool showLoading = _dialogOpenTime != null && 
-                DateTime.now().difference(_dialogOpenTime!).inSeconds < 3 &&
-                !hasProgress; // Chỉ hiển thị loading nếu chưa có progress mới
-            
-            final bool isComplete = (_wpTotal > 0) && (_wpDone == _wpTotal);
-            final bool forceLoading = _forceLoading && (_wpDone == _wpTotal);
-            final int displayDone = showLoading ? 0 : _wpDone; // Hiển thị 0 trong 3s đầu (nếu chưa có progress)
-            final int displayTotal = showLoading ? 0 : (forceLoading ? (_wpTotal) : _wpTotal); // Hiển thị 0 trong 3s đầu (nếu chưa có progress)
-            final progress = (displayTotal > 0) ? (displayDone / displayTotal).clamp(0.0, 1.0) : 0.0;
-            
-            return AlertDialog(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              title: const Row(
-                children: [
-                  Icon(Icons.flight, color: Color(0xff2e7d32)),
-                  SizedBox(width: 8),
-                  Text('Tiến độ nhiệm vụ'),
-                ],
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Hiển thị loading trong 3s đầu, sau đó hiển thị giá trị wp
-                  if (showLoading) ...[
-                    // Loading indicator
-                    const SizedBox(
-                      width: 120,
-                      height: 120,
-                      child: Center(
-                        child: CircularProgressIndicator(
-                          strokeWidth: 8,
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            Color(0xff2e7d32),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Đang tải...',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey.shade700,
-                      ),
-                    ),
-                  ] else ...[
-                    // a/b ở trên cùng
-                    Text(
-                      '$displayDone/$displayTotal',
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xff2e7d32),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // Circular progress indicator
-                    SizedBox(
-                      width: 120,
-                      height: 120,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          CircularProgressIndicator(
-                            value: progress,
-                            strokeWidth: 8,
-                            backgroundColor: Colors.grey.shade300,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              const Color(0xff2e7d32),
-                            ),
-                          ),
-                          Text(
-                            '${(progress * 100).toStringAsFixed(0)}%',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.grey.shade700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      forceLoading
-                          ? 'Đang tải đường bay lên...'
-                          : (isComplete ? 'Hoàn thành!' : 'Đang tải đường bay lên...'),
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey.shade700,
-                      ),
-                    ),
-                    // Hiển thị câu lệnh để debug khi done == total
-                    if (_wpDone == _wpTotal && _wpTotal > 0 && _lastMissionCmd.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade100,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.grey.shade300),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Lệnh đã gửi (debug):',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey.shade700,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            SelectableText(
-                              _lastMissionCmd,
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontFamily: 'monospace',
-                                color: Colors.grey.shade800,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ],
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    _hideMissionProgressDialog();
-                  },
-                  child: const Text(
-                    'Thoát',
-                    style: TextStyle(
-                      color: Color(0xffe53935),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
+        return _MissionProgressDialog(
+          wpDone: _wpDone,
+          wpTotal: _wpTotal,
+          dialogOpenTime: _dialogOpenTime,
+          forceLoading: _forceLoading,
+          eventBus: _eventBus,
+          onClose: () => _hideMissionProgressDialog(),
         );
       },
     );
@@ -1121,10 +1320,16 @@ class _CompassScreenState extends State<CompassScreen> {
     if (!_isMissionDialogOpen) return;
     _isMissionDialogOpen = false;
     _dialogOpenTime = null; // Reset thời gian mở dialog
-    Navigator.of(context).pop();
-    setState(() {
-      // Trigger rebuild để hiển thị nút Start nếu điều kiện đủ
-    });
+    // Chỉ pop nếu dialog vẫn còn trên stack (tránh pop 2 lần khi dialog tự đóng)
+    // Nếu dialog đã tự đóng bằng Navigator.pop() thì canPop() sẽ trả về false
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
+    if (mounted) {
+      setState(() {
+        // Trigger rebuild để hiển thị nút Start nếu điều kiện đủ
+      });
+    }
   }
 
   // ---- Polyline encoder (Google) with 1e5 scaling ----
@@ -1202,7 +1407,7 @@ class _CompassScreenState extends State<CompassScreen> {
                 keepBuffer: 2,
               ),
               // Accepted polygons (multiple polygons) - render first to avoid overlap
-              if (_acceptedPolygons.isNotEmpty && !_hidePolygons)
+              if (_acceptedPolygons.isNotEmpty)
                 PolygonLayer(
                   polygons: _acceptedPolygons.map((polygon) {
                     return Polygon(
@@ -1214,7 +1419,7 @@ class _CompassScreenState extends State<CompassScreen> {
                   }).toList(),
                 ),
               // Drawing polyline (ordered points) - render on top
-              if (_points.length >= 2 && !_hidePolygons)
+              if (_points.length >= 2)
                 PolylineLayer(
                   polylines: [
                     Polyline(
@@ -1225,7 +1430,7 @@ class _CompassScreenState extends State<CompassScreen> {
                   ],
                 ),
               // Drawing polygon (current points) - render on top with different color
-              if (_points.length >= 3 && !_hidePolygons)
+              if (_points.length >= 3)
                 PolygonLayer(
                   polygons: [
                     Polygon(
@@ -1249,6 +1454,7 @@ class _CompassScreenState extends State<CompassScreen> {
                       onDragEnd: _onPointDrag,
                       mapController: _mapController,
                       disabled: _showBearing || !_isDrawingMode || _acceptedPolygons.isNotEmpty || _hasWaypoints,
+                      isDeleteMode: _isDeleteMode,
                       onDragStart: () {
                         // Lưu state trước khi bắt đầu drag điểm (chỉ lưu 1 lần cho mỗi lần drag)
                         if (!_hasSavedDragState) {
@@ -1265,6 +1471,10 @@ class _CompassScreenState extends State<CompassScreen> {
                           _hasSavedDragState = false; // Reset flag khi kết thúc drag
                         });
                       },
+                      onTap: _isDeleteMode ? (index) {
+                        // Chỉ hiện dialog xóa khi đang ở chế độ delete mode
+                        _showDeletePointDialog(index);
+                      } : null, // Khi OFF: không xóa khi tap, chỉ drag
                     );
                   }).toList(),
                 ),
@@ -1518,7 +1728,7 @@ class _CompassScreenState extends State<CompassScreen> {
                       const SizedBox(width: 8),
                       Text(
                         _isBleConnected 
-                            ? 'Đã kết nối: AgriBeacon BLE'
+                            ? 'Đã kết nối: ${_bleService.deviceName ?? 'AgriBeacon DRONE'}'
                             : 'Đang kết nối đến thiết bị bay',
                         style: const TextStyle(
                           color: Colors.white,
@@ -1611,17 +1821,8 @@ class _CompassScreenState extends State<CompassScreen> {
                     FloatingActionButton(
                       mini: true,
                       backgroundColor: const Color(0xff1976d2),
-                      onPressed: _isUploading ? null : _onUpload,
-                      child: _isUploading
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                              ),
-                            )
-                          : const Icon(Icons.cloud_upload, color: Colors.white),
+                      onPressed: _onUpload,
+                      child: const Icon(Icons.cloud_upload, color: Colors.white),
                       tooltip: 'Upload',
                     ),
                   if (_hasWaypoints) const SizedBox(height: 8),
@@ -1664,12 +1865,31 @@ class _CompassScreenState extends State<CompassScreen> {
                     tooltip: 'Hoàn tác',
                   ),
                   const SizedBox(height: 8),
-                  // Delete All button
+                  // Delete Mode button (toggle ON/OFF để xóa từng điểm)
+                  if (!_hasWaypoints)
+                  FloatingActionButton(
+                    mini: true,
+                    backgroundColor: _isDeleteMode 
+                        ? const Color(0xffff6f00)  // Màu cam khi ON
+                        : Colors.grey.shade700,    // Màu xám khi OFF
+                    onPressed: _showBearing ? null : () {
+                      setState(() {
+                        _isDeleteMode = !_isDeleteMode; // Toggle ON/OFF
+                      });
+                    },
+                    child: Icon(
+                      _isDeleteMode ? Icons.delete : Icons.delete_outline,
+                      color: Colors.white,
+                    ),
+                    tooltip: _isDeleteMode ? 'Chế độ xóa: ON (nhấn để tắt)' : 'Chế độ xóa: OFF (nhấn để bật)',
+                  ),
+                  if (!_hasWaypoints) const SizedBox(height: 8),
+                  // Delete All button (xóa tất cả - tách biệt với delete mode)
                   FloatingActionButton(
                     mini: true,
                     backgroundColor: const Color(0xffe53935),
                     onPressed: _showBearing ? null : _clearAll,
-                    child: const Icon(Icons.delete, color: Colors.white),
+                    child: const Icon(Icons.delete_sweep, color: Colors.white),
                     tooltip: 'Xóa tất cả',
                   ),
                 ],
@@ -1707,7 +1927,7 @@ class _CompassScreenState extends State<CompassScreen> {
                                 max: 100.0,
                                 divisions: 189, // steps of 0.5 from 5.5 to 100.0
                                 value: _altitude,
-                                onChanged: (v) => setState(() => _altitude = v),
+                                onChanged: _hasWaypoints ? null : (v) => setState(() => _altitude = v),
                               ),
                             ),
                           ),
