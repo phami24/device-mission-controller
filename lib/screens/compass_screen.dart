@@ -584,7 +584,9 @@ class _CompassScreenState extends State<CompassScreen> {
   // BLE connection state
   final BleService _bleService = BleService();
   bool _isBleConnected = false;
+  String _reconnectStatus = ''; // Status message for reconnect attempts
   StreamSubscription<bool>? _bleConnectionSubscription;
+  StreamSubscription<String>? _reconnectStatusSubscription;
   Timer? _bleReconnectTimer;
   
   // BLE message subscriptions via EventBus (backward compatible)
@@ -622,6 +624,15 @@ class _CompassScreenState extends State<CompassScreen> {
       if (mounted) {
         setState(() {
           _isBleConnected = isConnected;
+        });
+      }
+    });
+    
+    // Listen to reconnect status (reconnect attempts)
+    _reconnectStatusSubscription = _bleService.reconnectStatus.listen((status) {
+      if (mounted) {
+        setState(() {
+          _reconnectStatus = status;
         });
       }
     });
@@ -802,6 +813,7 @@ class _CompassScreenState extends State<CompassScreen> {
   @override
   void dispose() {
     _bleConnectionSubscription?.cancel();
+    _reconnectStatusSubscription?.cancel();
     _bleReconnectTimer?.cancel();
     _wpDialogTimer?.cancel(); // Hủy timer dialog
     _homeEventSubscription?.cancel();
@@ -1069,7 +1081,7 @@ class _CompassScreenState extends State<CompassScreen> {
     };
 
     final altitude = _altitude;
-    const fovDeg = 28.0; // Fixed FOV
+    const fovDeg = 23.0; // Fixed FOV
     final headingDeg = _normalizedBearingDeg; // Use normalized bearing (-180..180)
 
     // Generate waypoints for all polygons starting from home point
@@ -1728,8 +1740,10 @@ class _CompassScreenState extends State<CompassScreen> {
                       const SizedBox(width: 8),
                       Text(
                         _isBleConnected 
-                            ? 'Đã kết nối: ${_bleService.deviceName ?? 'AgriBeacon DRONE'}'
-                            : 'Đang kết nối đến thiết bị bay',
+                            ? 'Đã kết nối: ${_bleService.deviceName ?? 'AgriBeacon BLE'}'
+                            : (_reconnectStatus.isNotEmpty 
+                                ? _reconnectStatus 
+                                : 'Đang kết nối đến thiết bị bay'),
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 14,
@@ -1924,8 +1938,8 @@ class _CompassScreenState extends State<CompassScreen> {
                               ),
                               child: Slider(
                                 min: 5.5,
-                                max: 100.0,
-                                divisions: 189, // steps of 0.5 from 5.5 to 100.0
+                                max: 300.0,
+                                divisions: 189, // steps of 0.5 from 5.5 to 300.0
                                 value: _altitude,
                                 onChanged: _hasWaypoints ? null : (v) => setState(() => _altitude = v),
                               ),
